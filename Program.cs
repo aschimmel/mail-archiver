@@ -105,6 +105,9 @@ builder.Services.Configure<AuthenticationOptions>(
 builder.Services.Configure<OAuthOptions>(
     builder.Configuration.GetSection(OAuthOptions.OAuth));
 
+builder.Services.Configure<M365OAuthOptions>(
+    builder.Configuration.GetSection(M365OAuthOptions.M365OAuth));
+
 // Add Batch Restore Options
 builder.Services.Configure<BatchRestoreOptions>(
     builder.Configuration.GetSection(BatchRestoreOptions.BatchRestore));
@@ -277,6 +280,7 @@ builder.Services.AddDbContext<MailArchiverDbContext>(options =>
 });
 
 // Services hinzufügen
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<IGraphEmailService, GraphEmailService>(provider =>
     new GraphEmailService(
         provider.GetRequiredService<MailArchiverDbContext>(),
@@ -285,13 +289,15 @@ builder.Services.AddScoped<IGraphEmailService, GraphEmailService>(provider =>
         provider.GetRequiredService<IOptions<BatchOperationOptions>>(),
         provider.GetRequiredService<IOptions<MailSyncOptions>>(),
         provider.GetRequiredService<MailArchiver.Utilities.DateTimeHelper>(),
-        provider.GetRequiredService<MailArchiver.Services.Core.EmailCoreService>()
+        provider.GetRequiredService<MailArchiver.Services.Core.EmailCoreService>(),
+        provider.GetRequiredService<M365OAuthTokenService>()
     ));
 // Register GraphEmailService also for IProviderEmailService
 builder.Services.AddScoped<MailArchiver.Services.Providers.IProviderEmailService>(provider => 
     provider.GetRequiredService<IGraphEmailService>() as MailArchiver.Services.Providers.IProviderEmailService);
 builder.Services.AddScoped<IAuthenticationService, CookieAuthenticationService>();
 builder.Services.AddScoped<OAuthAuthenticationService>();
+builder.Services.AddHttpClient<M365OAuthTokenService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddSingleton<ISyncJobService, SyncJobService>(); // NEUE SERVICE
 

@@ -30,6 +30,9 @@ namespace MailArchiver.Services.Providers
         private readonly BatchOperationOptions _batchOptions;
         private readonly MailSyncOptions _mailSyncOptions;
         private readonly DateTimeHelper _dateTimeHelper;
+        private readonly M365OAuthTokenService _m365OAuthTokenService;
+        private static readonly TimeSpan OAuthExpiryBuffer = TimeSpan.FromMinutes(5);
+        private static readonly string[] ImapOAuthScopes = new[] { "offline_access", "https://outlook.office.com/IMAP.AccessAsUser.All" };
 
         public ImapEmailService(
             MailArchiverDbContext context,
@@ -38,7 +41,8 @@ namespace MailArchiver.Services.Providers
             ISyncJobService syncJobService,
             IOptions<BatchOperationOptions> batchOptions,
             IOptions<MailSyncOptions> mailSyncOptions,
-            DateTimeHelper dateTimeHelper)
+            DateTimeHelper dateTimeHelper,
+            M365OAuthTokenService m365OAuthTokenService)
         {
             _context = context;
             _logger = logger;
@@ -47,6 +51,7 @@ namespace MailArchiver.Services.Providers
             _batchOptions = batchOptions.Value;
             _mailSyncOptions = mailSyncOptions.Value;
             _dateTimeHelper = dateTimeHelper;
+            _m365OAuthTokenService = m365OAuthTokenService;
         }
 
         #region Interface Implementation (IProviderEmailService)
@@ -722,6 +727,16 @@ namespace MailArchiver.Services.Providers
             client.AuthenticationMechanisms.Remove("NEGOTIATE");
 
             var username = GetAuthenticationUsername(account);
+            if (account.Provider == ProviderType.IMAP && account.M365AuthMode == M365AuthenticationMode.OAuth2)
+            {
+                var accessToken = await GetValidOAuthAccessTokenAsync(account);
+                _logger.LogDebug("Attempting XOAUTH2 authentication for IMAP account {AccountName}", account.Name);
+                var oauth2 = new SaslMechanismOAuth2(username, accessToken);
+                await client.AuthenticateAsync(oauth2);
+                _logger.LogDebug("XOAUTH2 authentication successful for IMAP account {AccountName}", account.Name);
+                return;
+            }
+
             var password = account.Password;
 
             // Try SASL PLAIN first (preferred for Exchange 2019 and similar servers)
@@ -752,6 +767,59 @@ namespace MailArchiver.Services.Providers
             // This works for T-Online and other providers that don't support PLAIN
             _logger.LogDebug("Using auto-negotiated authentication for account {AccountName}", account.Name);
             await client.AuthenticateAsync(username, password);
+        }
+
+        private async Task<string> GetValidOAuthAccessTokenAsync(MailAccount account, CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(account.OAuthAccessToken) &&
+                account.OAuthAccessTokenExpiresAtUtc.HasValue &&
+                account.OAuthAccessTokenExpiresAtUtc.Value > now.Add(OAuthExpiryBuffer))
+            {
+                return account.OAuthAccessToken;
+            }
+
+            if (string.IsNullOrWhiteSpace(account.OAuthRefreshToken))
+            {
+                throw new InvalidOperationException(
+                    $"OAuth refresh token is missing for IMAP account '{account.Name}' (ID: {account.Id}). Reconnect the account.");
+            }
+
+            var refreshed = await _m365OAuthTokenService.RefreshAccessTokenAsync(account.OAuthRefreshToken, ImapOAuthScopes, cancellationToken);
+            if (refreshed == null || string.IsNullOrWhiteSpace(refreshed.AccessToken))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to refresh OAuth access token for IMAP account '{account.Name}' (ID: {account.Id}).");
+            }
+
+            var expiresAtUtc = DateTime.UtcNow.AddSeconds(refreshed.ExpiresIn > 0 ? refreshed.ExpiresIn : 3600);
+            var refreshToken = string.IsNullOrWhiteSpace(refreshed.RefreshToken)
+                ? account.OAuthRefreshToken
+                : refreshed.RefreshToken;
+
+            var updatedRows = await _context.MailAccounts
+                .Where(a => a.Id == account.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(a => a.OAuthAccessToken, refreshed.AccessToken)
+                    .SetProperty(a => a.OAuthAccessTokenExpiresAtUtc, expiresAtUtc)
+                    .SetProperty(a => a.OAuthRefreshToken, refreshToken)
+                    .SetProperty(a => a.OAuthTokenScope, refreshed.Scope)
+                    .SetProperty(a => a.OAuthTokenType, refreshed.TokenType),
+                    cancellationToken);
+
+            if (updatedRows == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to persist refreshed OAuth token because account '{account.Name}' (ID: {account.Id}) no longer exists.");
+            }
+
+            account.OAuthAccessToken = refreshed.AccessToken;
+            account.OAuthAccessTokenExpiresAtUtc = expiresAtUtc;
+            account.OAuthRefreshToken = refreshToken;
+            account.OAuthTokenScope = refreshed.Scope;
+            account.OAuthTokenType = refreshed.TokenType;
+
+            return refreshed.AccessToken;
         }
 
         /// <summary>

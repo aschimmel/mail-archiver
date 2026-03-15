@@ -1,5 +1,4 @@
 # 📧 Mail-Archiver - Email Archiving System
-
 **A comprehensive solution for archiving, searching, and exporting emails**
 
 <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
@@ -33,7 +32,9 @@
 
 ### 🧩 Email Provider Support
 - **IMAP**: Traditional IMAP accounts with full synchronization capabilities
-- **M365**: Microsoft 365 mail accounts via Microsoft Graph API ([Setup Guide](doc/AZURE_APP_REGISTRATION_M365.md))
+- **M365**: Microsoft 365 mailboxes can be archived either via Graph app credentials or via IMAP OAuth2/XOAUTH2 ([Setup Guide](doc/AZURE_APP_REGISTRATION_M365.md))
+  - Graph App Credentials mode (`ClientId` / `ClientSecret` / `TenantId`)
+  - IMAP OAuth2 Connect mode (authorization code + refresh token)
 - **IMPORT**: Import-only accounts for migrating existing email archives
 
 ### 📥 Import & Restore Functions
@@ -146,6 +147,9 @@ docker compose restart
 - Navigate to "Email Accounts" section
 - Click "New Account"
 - Enter your server details and credentials
+- For M365 accounts, select the authentication mode:
+  - Legacy App Credentials: provide `ClientId`, `ClientSecret`, and `TenantId`
+  - OAuth2 Connect (IMAP OAuth2): save the account, then use **Edit** -> **Connect** to complete OAuth2 authorization
 - Save and start archiving!
 - If you want, create other users and assign accounts.
 
@@ -156,6 +160,8 @@ docker compose restart
 
 ## ⚙️ Advanced Setup
 For a complete list of all configuration options, please refer to the [Setup Guide](doc/Setup.md).
+
+For M365 OAuth2 Connect mode, application-level Microsoft OAuth settings are read from the `M365OAuth` configuration section (or matching environment variables such as `M365OAuth__ClientId`).
 
 
 ## 📋 Technical Details

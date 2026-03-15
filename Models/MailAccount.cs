@@ -31,6 +31,13 @@ public class MailAccount
     public string? ClientId { get; set; }
     public string? ClientSecret { get; set; }
     public string? TenantId { get; set; }
+    public M365AuthenticationMode M365AuthMode { get; set; } = M365AuthenticationMode.AppCredentials;
+    public string? OAuthAccessToken { get; set; }
+    public DateTime? OAuthAccessTokenExpiresAtUtc { get; set; }
+    public string? OAuthRefreshToken { get; set; }
+    public string? OAuthTokenScope { get; set; }
+    public string? OAuthTokenType { get; set; }
+    public DateTime? OAuthConnectedAtUtc { get; set; }
     
     [NotMapped]
     public List<string> ExcludedFoldersList

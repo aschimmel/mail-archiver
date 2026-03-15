@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Localization;
+using System.Security.Cryptography;
 
 using MailArchiver.Attributes;
 
@@ -32,6 +33,12 @@ namespace MailArchiver.Controllers
     private readonly IExportService _exportService;
     private readonly IAccessLogService _accessLogService;
     private readonly IMailAccountDeletionService _mailAccountDeletionService;
+    private readonly M365OAuthTokenService _m365OAuthTokenService;
+    private const string M365OAuthStateSessionKey = "M365OAuth2State";
+    private const string M365OAuthAccountIdSessionKey = "M365OAuth2AccountId";
+    private const string M365OAuthReturnUrlSessionKey = "M365OAuth2ReturnUrl";
+    private static readonly string[] GraphOAuthScopes = new[] { "offline_access", "Mail.Read", "Mail.ReadWrite" };
+    private static readonly string[] ImapOAuthScopes = new[] { "offline_access", "https://outlook.office.com/IMAP.AccessAsUser.All" };
 
     public MailAccountsController(
         MailArchiverDbContext context,
@@ -48,7 +55,8 @@ namespace MailArchiver.Controllers
         IServiceScopeFactory serviceScopeFactory,
         IExportService exportService,
         IAccessLogService accessLogService,
-        IMailAccountDeletionService mailAccountDeletionService)
+        IMailAccountDeletionService mailAccountDeletionService,
+        M365OAuthTokenService m365OAuthTokenService)
     {
         _context = context;
         _emailCoreService = emailCoreService;
@@ -65,6 +73,7 @@ namespace MailArchiver.Controllers
         _exportService = exportService;
         _accessLogService = accessLogService;
         _mailAccountDeletionService = mailAccountDeletionService;
+        _m365OAuthTokenService = m365OAuthTokenService;
     }
 
         private async Task<bool> HasAccessToAccountAsync(int accountId)
@@ -144,7 +153,9 @@ namespace MailArchiver.Controllers
                     IsEnabled = a.IsEnabled,
                     LastSync = a.LastSync,
                     DeleteAfterDays = a.DeleteAfterDays,
-                    Provider = a.Provider
+                    Provider = a.Provider,
+                    ImapAuthMode = a.Provider == ProviderType.IMAP ? a.M365AuthMode : M365AuthenticationMode.AppCredentials,
+                    M365AuthMode = a.Provider == ProviderType.M365 ? a.M365AuthMode : M365AuthenticationMode.AppCredentials
                 })
                 .ToListAsync();
 
@@ -167,6 +178,14 @@ namespace MailArchiver.Controllers
                 return NotFound();
             }
 
+            if (account.Provider != ProviderType.M365 && account.Provider != ProviderType.IMAP)
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2UnsupportedProvider",
+                    "OAuth2 connect is only supported for M365 and IMAP accounts.");
+                return RedirectToAction(nameof(Edit), new { id });
+            }
+
             // E-Mail-Anzahl abrufen
             var emailCount = await _emailCoreService.GetEmailCountByAccountAsync(id);
 
@@ -183,6 +202,8 @@ var model = new MailAccountViewModel
                 IsEnabled = account.IsEnabled,
                 DeleteAfterDays = account.DeleteAfterDays,
                 Provider = account.Provider,
+                ImapAuthMode = account.Provider == ProviderType.IMAP ? account.M365AuthMode : M365AuthenticationMode.AppCredentials,
+                M365AuthMode = account.Provider == ProviderType.M365 ? account.M365AuthMode : M365AuthenticationMode.AppCredentials,
             };
 
             ViewBag.EmailCount = emailCount;
@@ -196,7 +217,9 @@ var model = new MailAccountViewModel
             {
                 ImapPort = 993, // Standard values
                 UseSSL = true,
-                Provider = ProviderType.IMAP
+                Provider = ProviderType.IMAP,
+                ImapAuthMode = M365AuthenticationMode.AppCredentials,
+                M365AuthMode = M365AuthenticationMode.AppCredentials
             };
             return View(model);
         }
@@ -206,8 +229,30 @@ var model = new MailAccountViewModel
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Create(CreateMailAccountViewModel model)
         {
+            if ((model.Provider == ProviderType.M365 && model.M365AuthMode == M365AuthenticationMode.OAuth2) ||
+                (model.Provider == ProviderType.IMAP && model.ImapAuthMode == M365AuthenticationMode.OAuth2))
+            {
+                if (model.Provider == ProviderType.M365)
+                {
+                    // OAuth2 mode does not require app credentials during create/edit flows.
+                    ModelState.Remove(nameof(model.ClientId));
+                    ModelState.Remove(nameof(model.ClientSecret));
+                    ModelState.Remove(nameof(model.TenantId));
+                }
+                else
+                {
+                    // IMAP OAuth2 mode does not require password.
+                    ModelState.Remove(nameof(model.Password));
+                }
+            }
+
             if (ModelState.IsValid)
             {
+                var isM365AppCredentials = model.Provider == ProviderType.M365 && model.M365AuthMode == M365AuthenticationMode.AppCredentials;
+                var effectiveAuthMode = model.Provider == ProviderType.IMAP
+                    ? model.ImapAuthMode
+                    : (model.Provider == ProviderType.M365 ? model.M365AuthMode : M365AuthenticationMode.AppCredentials);
+
                 var account = new MailAccount
                 {
                     Name = model.Name,
@@ -215,13 +260,16 @@ var model = new MailAccountViewModel
                     ImapServer = model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.ImapServer,
                     ImapPort = model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.ImapPort,
                     Username = model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.Username,
-                    Password = model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.Password,
+                    Password = model.Provider == ProviderType.IMAP && model.ImapAuthMode == M365AuthenticationMode.OAuth2
+                        ? null
+                        : (model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.Password),
                     UseSSL = model.UseSSL,
                     IsEnabled = model.IsEnabled,
                     Provider = model.Provider,
-                    ClientId = model.Provider == ProviderType.M365 ? model.ClientId : null,
-                    ClientSecret = model.Provider == ProviderType.M365 ? model.ClientSecret : null,
-                    TenantId = model.Provider == ProviderType.M365 ? model.TenantId : null,
+                    M365AuthMode = effectiveAuthMode,
+                    ClientId = isM365AppCredentials ? model.ClientId : null,
+                    ClientSecret = isM365AppCredentials ? model.ClientSecret : null,
+                    TenantId = isM365AppCredentials ? model.TenantId : null,
                     ExcludedFolders = string.Empty,
                     DeleteAfterDays = model.DeleteAfterDays,
                     LocalRetentionDays = model.LocalRetentionDays,
@@ -250,7 +298,7 @@ var model = new MailAccountViewModel
                         model.Name, model.Provider);
 
                     // Test connection before saving (only for non-import-only accounts)
-                    if (account.Provider == ProviderType.IMAP)
+                    if (account.Provider == ProviderType.IMAP && account.M365AuthMode == M365AuthenticationMode.AppCredentials)
                     {
                         _logger.LogInformation("Testing connection for account: {Name}, Server: {Server}:{Port}",
                             model.Name, model.ImapServer, model.ImapPort);
@@ -339,6 +387,9 @@ var model = new MailAccountViewModel
                 DeleteAfterDays = account.DeleteAfterDays,
                 LocalRetentionDays = account.LocalRetentionDays,
                 Provider = account.Provider,
+                ImapAuthMode = account.Provider == ProviderType.IMAP ? account.M365AuthMode : M365AuthenticationMode.AppCredentials,
+                M365AuthMode = account.Provider == ProviderType.M365 ? account.M365AuthMode : M365AuthenticationMode.AppCredentials,
+                OAuthConnectedAtUtc = account.OAuthConnectedAtUtc,
                 ClientId = account.ClientId,
                 ClientSecret = account.ClientSecret,
                 TenantId = account.TenantId
@@ -415,6 +466,23 @@ var model = new MailAccountViewModel
                 ModelState.Remove("Password");
             }
 
+            if ((model.Provider == ProviderType.M365 && model.M365AuthMode == M365AuthenticationMode.OAuth2) ||
+                (model.Provider == ProviderType.IMAP && model.ImapAuthMode == M365AuthenticationMode.OAuth2))
+            {
+                if (model.Provider == ProviderType.M365)
+                {
+                    // OAuth2 mode does not require app credentials during create/edit flows.
+                    ModelState.Remove(nameof(model.ClientId));
+                    ModelState.Remove(nameof(model.ClientSecret));
+                    ModelState.Remove(nameof(model.TenantId));
+                }
+                else
+                {
+                    // IMAP OAuth2 mode does not require password.
+                    ModelState.Remove(nameof(model.Password));
+                }
+            }
+
             if (ModelState.IsValid)
             {
                 try
@@ -432,14 +500,18 @@ var model = new MailAccountViewModel
                     account.Username = model.Provider == ProviderType.IMPORT || model.Provider != ProviderType.IMAP ? null : model.Username;
                     account.IsEnabled = model.IsEnabled;
                     account.Provider = model.Provider;
-                    account.ClientId = model.Provider == ProviderType.M365 ? model.ClientId : null;
+                    account.M365AuthMode = model.Provider == ProviderType.IMAP
+                        ? model.ImapAuthMode
+                        : (model.Provider == ProviderType.M365 ? model.M365AuthMode : M365AuthenticationMode.AppCredentials);
+                    var isM365AppCredentials = model.Provider == ProviderType.M365 && model.M365AuthMode == M365AuthenticationMode.AppCredentials;
+                    account.ClientId = isM365AppCredentials ? model.ClientId : null;
                     
                     // Only update ClientSecret if provided for M365 accounts
-                    if (model.Provider == ProviderType.M365 && !string.IsNullOrEmpty(model.ClientSecret))
+                    if (isM365AppCredentials && !string.IsNullOrEmpty(model.ClientSecret))
                     {
                         account.ClientSecret = model.ClientSecret;
                     }
-                    else if (model.Provider == ProviderType.M365)
+                    else if (isM365AppCredentials)
                     {
                         // If no new ClientSecret provided for M365, keep the existing one
                         // Do not overwrite with null
@@ -450,12 +522,16 @@ var model = new MailAccountViewModel
                         account.ClientSecret = null;
                     }
                     
-                    account.TenantId = model.Provider == ProviderType.M365 ? model.TenantId : null;
+                    account.TenantId = isM365AppCredentials ? model.TenantId : null;
 
                     // Only update password if provided
                     if (!string.IsNullOrEmpty(model.Password))
                     {
                         account.Password = model.Password;
+                    }
+                    else if (account.Provider == ProviderType.IMAP && account.M365AuthMode == M365AuthenticationMode.OAuth2)
+                    {
+                        account.Password = null;
                     }
 
                     account.UseSSL = model.UseSSL;
@@ -480,7 +556,9 @@ var model = new MailAccountViewModel
                     }
 
                     // Test connection before saving (only for IMAP accounts)
-                    if (!string.IsNullOrEmpty(model.Password) && account.Provider == ProviderType.IMAP)
+                    if (account.Provider == ProviderType.IMAP &&
+                        account.M365AuthMode == M365AuthenticationMode.AppCredentials &&
+                        !string.IsNullOrEmpty(model.Password))
                     {
                         var provider = await _providerFactory.GetServiceForAccountAsync(account.Id);
 
@@ -505,7 +583,9 @@ var model = new MailAccountViewModel
                     }
                     
                     // Handle bulk update if requested
-                    if (ApplyToAllDomainAccounts && account.Provider == ProviderType.M365)
+                    if (ApplyToAllDomainAccounts &&
+                        account.Provider == ProviderType.M365 &&
+                        account.M365AuthMode == M365AuthenticationMode.AppCredentials)
                     {
                         _logger.LogInformation("Bulk update requested for account {AccountId} ({AccountName})", account.Id, account.Name);
                         
@@ -586,6 +666,187 @@ var model = new MailAccountViewModel
                 }
             }
             return View(model);
+        }
+
+        // GET: MailAccounts/ConnectM365OAuth2/5
+        [HttpGet]
+        public async Task<IActionResult> ConnectM365OAuth2(int id, string? returnUrl = null)
+        {
+            if (!await HasAccessToAccountAsync(id))
+            {
+                return NotFound();
+            }
+
+            var account = await _context.MailAccounts.FindAsync(id);
+            if (account == null)
+            {
+                return NotFound();
+            }
+
+            var callbackUrl = Url.Action(nameof(M365OAuth2Callback), "MailAccounts", null, Request.Scheme);
+            if (string.IsNullOrWhiteSpace(callbackUrl))
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2CallbackUrlBuildFailed",
+                    "Could not start Microsoft 365 OAuth2 connection because the callback URL is invalid.");
+                return RedirectToAction(nameof(Edit), new { id });
+            }
+
+            var state = GenerateOAuthState();
+            HttpContext.Session.SetString(M365OAuthStateSessionKey, state);
+            HttpContext.Session.SetString(M365OAuthAccountIdSessionKey, id.ToString());
+            HttpContext.Session.SetString(M365OAuthReturnUrlSessionKey, returnUrl ?? string.Empty);
+
+            var authorizationUrl = _m365OAuthTokenService.BuildAuthorizationUrl(
+                callbackUrl,
+                state,
+                GetOAuthScopesForAccount(account),
+                account.EmailAddress);
+            if (string.IsNullOrWhiteSpace(authorizationUrl))
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2AuthorizationUrlBuildFailed",
+                    "Could not start Microsoft 365 OAuth2 connection.");
+                return RedirectToAction(nameof(Edit), new { id });
+            }
+
+            return Redirect(authorizationUrl);
+        }
+
+        // GET: MailAccounts/M365OAuth2Callback
+        [HttpGet]
+        public async Task<IActionResult> M365OAuth2Callback(
+            string? code,
+            string? state,
+            string? error = null,
+            string? error_description = null)
+        {
+            var sessionState = HttpContext.Session.GetString(M365OAuthStateSessionKey);
+            var sessionAccountIdValue = HttpContext.Session.GetString(M365OAuthAccountIdSessionKey);
+            var sessionReturnUrl = HttpContext.Session.GetString(M365OAuthReturnUrlSessionKey);
+            var hasValidAccountId = int.TryParse(sessionAccountIdValue, out var accountId);
+            var isStateValid = !string.IsNullOrWhiteSpace(sessionState) &&
+                               !string.IsNullOrWhiteSpace(state) &&
+                               string.Equals(sessionState, state, StringComparison.Ordinal);
+
+            // Clear one-time state regardless of callback outcome.
+            HttpContext.Session.Remove(M365OAuthStateSessionKey);
+            HttpContext.Session.Remove(M365OAuthAccountIdSessionKey);
+            HttpContext.Session.Remove(M365OAuthReturnUrlSessionKey);
+
+            if (!hasValidAccountId || !isStateValid)
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2InvalidState",
+                    "Invalid OAuth2 callback state. Please try connecting again.");
+                return RedirectToAction(nameof(Index));
+            }
+
+            if (!await HasAccessToAccountAsync(accountId))
+            {
+                return NotFound();
+            }
+
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                TempData["ErrorMessage"] = string.IsNullOrWhiteSpace(error_description)
+                    ? LocalizeWithFallback("M365OAuth2AuthorizationDenied", "Microsoft 365 OAuth2 authorization was denied.")
+                    : LocalizeWithFallback("M365OAuth2AuthorizationDeniedWithReason", "Microsoft 365 OAuth2 authorization was denied: {0}", error_description);
+                return RedirectToLocalOrEdit(accountId, sessionReturnUrl);
+            }
+
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2MissingAuthorizationCode",
+                    "Microsoft 365 OAuth2 callback did not include an authorization code.");
+                return RedirectToLocalOrEdit(accountId, sessionReturnUrl);
+            }
+
+            var account = await _context.MailAccounts.FindAsync(accountId);
+            if (account == null)
+            {
+                return NotFound();
+            }
+
+            var callbackUrl = Url.Action(nameof(M365OAuth2Callback), "MailAccounts", null, Request.Scheme);
+            if (string.IsNullOrWhiteSpace(callbackUrl))
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2CallbackUrlBuildFailed",
+                    "Could not complete Microsoft 365 OAuth2 connection because the callback URL is invalid.");
+                return RedirectToLocalOrEdit(accountId, sessionReturnUrl);
+            }
+
+            var tokenResponse = await _m365OAuthTokenService.RequestTokenWithAuthorizationCodeAsync(
+                code,
+                callbackUrl,
+                GetOAuthScopesForAccount(account),
+                HttpContext.RequestAborted);
+
+            if (tokenResponse == null || string.IsNullOrWhiteSpace(tokenResponse.AccessToken))
+            {
+                TempData["ErrorMessage"] = LocalizeWithFallback(
+                    "M365OAuth2TokenExchangeFailed",
+                    "Failed to complete Microsoft 365 OAuth2 token exchange.");
+                return RedirectToLocalOrEdit(accountId, sessionReturnUrl);
+            }
+
+            account.M365AuthMode = M365AuthenticationMode.OAuth2;
+            if (account.Provider == ProviderType.M365)
+            {
+                account.ClientId = null;
+                account.ClientSecret = null;
+                account.TenantId = null;
+            }
+            account.OAuthAccessToken = tokenResponse.AccessToken;
+            account.OAuthRefreshToken = tokenResponse.RefreshToken;
+            account.OAuthTokenScope = tokenResponse.Scope;
+            account.OAuthTokenType = tokenResponse.TokenType;
+            account.OAuthAccessTokenExpiresAtUtc = tokenResponse.ExpiresIn > 0
+                ? DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn)
+                : null;
+            account.OAuthConnectedAtUtc = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            TempData["SuccessMessage"] = LocalizeWithFallback(
+                "M365OAuth2Connected",
+                "Microsoft 365 OAuth2 connection established successfully.");
+
+            return RedirectToLocalOrEdit(accountId, sessionReturnUrl);
+        }
+
+        // POST: MailAccounts/DisconnectM365OAuth2/5
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> DisconnectM365OAuth2(int id, string? returnUrl = null)
+        {
+            if (!await HasAccessToAccountAsync(id))
+            {
+                return NotFound();
+            }
+
+            var account = await _context.MailAccounts.FindAsync(id);
+            if (account == null)
+            {
+                return NotFound();
+            }
+
+            account.OAuthAccessToken = null;
+            account.OAuthRefreshToken = null;
+            account.OAuthAccessTokenExpiresAtUtc = null;
+            account.OAuthTokenScope = null;
+            account.OAuthTokenType = null;
+            account.OAuthConnectedAtUtc = null;
+
+            await _context.SaveChangesAsync();
+
+            TempData["SuccessMessage"] = LocalizeWithFallback(
+                "M365OAuth2Disconnected",
+                "Microsoft 365 OAuth2 connection has been disconnected.");
+
+            return RedirectToLocalOrEdit(id, returnUrl);
         }
 
         // GET: MailAccounts/Delete/5
@@ -1786,6 +2047,45 @@ var model = new MailAccountViewModel
                 _logger.LogError(ex, "Error loading folders for account {AccountId}", accountId);
                 return Json(new List<string> { "INBOX" });
             }
+        }
+
+        private IActionResult RedirectToLocalOrEdit(int accountId, string? returnUrl)
+        {
+            if (!string.IsNullOrWhiteSpace(returnUrl) && Url.IsLocalUrl(returnUrl))
+            {
+                return Redirect(returnUrl);
+            }
+
+            return RedirectToAction(nameof(Edit), new { id = accountId });
+        }
+
+        private string LocalizeWithFallback(string key, string fallback, params object[] arguments)
+        {
+            var localized = _localizer[key, arguments];
+            if (!localized.ResourceNotFound &&
+                !string.Equals(localized.Value, key, StringComparison.Ordinal))
+            {
+                return localized.Value;
+            }
+
+            return arguments.Length > 0
+                ? string.Format(fallback, arguments)
+                : fallback;
+        }
+
+        private static string GenerateOAuthState()
+        {
+            return Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
+                .Replace("+", "-")
+                .Replace("/", "_")
+                .Replace("=", string.Empty);
+        }
+
+        private static string[] GetOAuthScopesForAccount(MailAccount account)
+        {
+            return account.Provider == ProviderType.M365
+                ? GraphOAuthScopes
+                : ImapOAuthScopes;
         }
 
         // Helper method to extract domain from email address

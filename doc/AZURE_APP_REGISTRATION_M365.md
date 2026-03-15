@@ -10,17 +10,19 @@ This guide provides comprehensive instructions for setting up Azure App Registra
 
 1. [Overview](#overview)
 2. [Azure App Registration for Email Retrieval](#azure-app-registration-for-email-retrieval)
-   - [Prerequisites](#prerequisites)
-   - [Create App Registration](#create-app-registration)
-   - [Set Required API Permissions](#set-required-api-permissions)
-   - [Generate Client Secret](#generate-client-secret)
+   - [Mode A: App Credentials (Application Permissions)](#mode-a-app-credentials-application-permissions)
+   - [Mode B: OAuth2 Connect (Delegated Permissions)](#mode-b-oauth2-connect-delegated-permissions)
 3. [Configure Mail Archiver M365 Account](#configure-mail-archiver-m365-account)
 4. [Retention Policy Setup](#retention-policy-setup)
    - [Configure Retention Policy](#configure-retention-policy)
 
 ## 🌐 Overview
 
-The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth2 client credentials flow for email retrieval. Additionally, it provides retention policy functionality to automatically delete emails from the mail server after a specified period, helping manage storage space while maintaining a complete archive.
+The Mail Archiver application supports Microsoft 365 (M365) accounts with two authentication modes:
+- **App Credentials** (legacy): client credentials with application permissions
+- **OAuth2 Connect**: authorization code + refresh token with delegated permissions
+
+Additionally, it provides retention policy functionality to automatically delete emails from the mail server after a specified period, helping manage storage space while maintaining a complete archive.
 
 ## ☁️ Azure App Registration for Email Retrieval
 
@@ -28,6 +30,8 @@ The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth
 
 - Administrative access to Microsoft Entra ID (Azure AD)
 - A Microsoft 365 tenant with Exchange Online licenses
+
+### 🔐 Mode A: App Credentials (Application Permissions)
 
 ### 🚀 Create App Registration
 
@@ -38,7 +42,7 @@ The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth
 5. Fill in the following details:
    - **Name**: Enter a descriptive name (e.g., "Mail Archiver M365 Provider")
    - **Supported account types**: Select **Accounts in this organizational directory only** (Single tenant)
-     - This is required for the client credentials flow used by Mail Archiver
+    - This is required for the client credentials flow used by Mail Archiver
    - **Redirect URI**: Leave this blank (not needed for client credentials flow)
 6. Click **Register**
 
@@ -51,7 +55,7 @@ The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth
 1. Navigate to **API permissions** in the left menu
 2. Click **+ Add a permission**
 3. Select **Microsoft Graph**
-4. Choose **Application permissions** (required for Mail Archiver's client credentials flow)
+4. Choose **Application permissions** (required for App Credentials mode)
 5. Add the following permissions:
    - **Mail.Read** - Read mail in all mailboxes
    - **Mail.ReadWrite** - Read and write mail in all mailboxes (for restore function as well as deletion)
@@ -60,7 +64,7 @@ The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth
 7. **CRITICAL**: Click **Grant admin consent for [Your Organization]**
 8. Confirm by clicking **Yes**
 
-**Note**: Application permissions are required because Mail Archiver uses client credentials flow to access mailboxes without user interaction.
+**Note**: Application permissions are required because App Credentials mode accesses mailboxes without interactive user login.
 
 ### 🔑 Generate Client Secret
 
@@ -71,15 +75,35 @@ The Mail Archiver application supports Microsoft 365 (M365) accounts using OAuth
 5. Click **Add**
 6. **Important**: Copy the **Value** immediately and store it securely. This secret will not be shown again.
 
+### 🔑 Mode B: OAuth2 Connect (Delegated IMAP Permissions)
+
+Use this mode when you want to connect the mailbox interactively in Mail Archiver using authorization code flow and store a refresh token.
+
+1. Navigate to the [Microsoft Entra Admin Center](https://entra.microsoft.com) and open **App registrations**
+2. Create a new registration (or use an existing one)
+3. In **Authentication**, add the redirect URI used by Mail Archiver for M365 OAuth2 Connect (must match your running Mail Archiver URL/path)
+4. In **API permissions**, add delegated IMAP permission:
+   - API: **Office 365 Exchange Online**
+   - Permission: `IMAP.AccessAsUser.All`
+5. Ensure `offline_access` is available for refresh tokens (requested by Mail Archiver during OAuth2 sign-in)
+6. Click **Grant admin consent** if your tenant policy requires admin approval for delegated permissions
+6. In **Certificates & secrets**, create a client secret and save it securely
+
+> ℹ️ Depending on tenant security policy, user consent may be restricted. In this case, an administrator must grant consent before users can complete the Connect flow.
+
 ## 📧 Configure Mail Archiver M365 Account
 
-After completing the app registration, you need to configure a M365 mail account in Mail Archiver with the following values:
+After completing the app registration, configure a M365 mail account in Mail Archiver and choose the authentication mode.
 
-### 📋 Required Values from App Registration:
+### 📋 Required Values from App Registration (Mode-dependent):
 
-1. **Client ID**: Copy the **Application (client) ID** from the app registration **Overview** page
-2. **Client Secret**: Copy the **Value** you saved when creating the client secret
-3. **Tenant ID**: Copy the **Directory (tenant) ID** from the app registration **Overview** page
+1. **App Credentials mode**
+   - **Client ID**: Application (client) ID
+   - **Client Secret**: Client secret value
+   - **Tenant ID**: Directory (tenant) ID
+2. **OAuth2 Connect mode (IMAP alternative)**
+   - **Client ID** and **Client Secret** are read from Mail Archiver `M365OAuth` settings (appsettings/env vars)
+   - Tenant selection comes from your authority/tenant configuration and interactive sign-in
 
 ### 🚀 Creating M365 Account in Mail Archiver:
 
@@ -89,11 +113,11 @@ After completing the app registration, you need to configure a M365 mail account
    - **Name**: Descriptive name for the account (e.g., "Sales Team M365")
    - **Email Address**: The target mailbox email address to archive
    - **Provider**: Select **M365**
-   - **Client ID**: Enter the Application (client) ID from your app registration
-   - **Client Secret**: Enter the client secret value you saved
-   - **Tenant ID**: Enter the Directory (tenant) ID from your app registration
+   - **Authentication Mode**: choose **App Credentials** or **OAuth2 Connect**
+   - For **App Credentials**: enter **Client ID**, **Client Secret**, and **Tenant ID**
 
 4. Click **Create**
+5. If you selected **OAuth2 Connect**, open the account with **Edit** and click **Connect** to complete Microsoft sign-in and consent
 
 ### ⚠️ Important Notes:
 

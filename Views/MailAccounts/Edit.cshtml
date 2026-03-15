@@ -1,4 +1,4 @@
-﻿@inject Microsoft.Extensions.Localization.IStringLocalizer<MailArchiver.SharedResource> Localizer
+@inject Microsoft.Extensions.Localization.IStringLocalizer<MailArchiver.SharedResource> Localizer
 @model MailArchiver.Models.ViewModels.MailAccountViewModel
 @{
     ViewData["Title"] = @Localizer["EditEmailAccount"];
@@ -47,15 +47,42 @@
                     </div>
                     <h4 class="mt-4">@Localizer["Authentication"]</h4>
                     <div class="mb-3">
+                        <label asp-for="ImapAuthMode" class="form-label">@Localizer["Authentication"]</label>
+                        <select asp-for="ImapAuthMode" class="form-select" id="ImapAuthMode">
+                            <option value="@M365AuthenticationMode.AppCredentials">@Localizer["Password"]</option>
+                            <option value="@M365AuthenticationMode.OAuth2">OAuth2</option>
+                        </select>
+                        <span asp-validation-for="ImapAuthMode" class="text-danger"></span>
+                    </div>
+                    <div class="mb-3">
                         <label asp-for="Username" class="form-label">@Localizer["Username"]</label>
                         <input asp-for="Username" class="form-control" />
                         <span asp-validation-for="Username" class="text-danger"></span>
                     </div>
-                    <div class="mb-3">
+                    <div id="imapPasswordFields" class="mb-3">
                         <label asp-for="Password" class="form-label">@Localizer["Password"]</label>
                         <input asp-for="Password" class="form-control" type="password" placeholder="@Localizer["LeaveEmptyToKeepCurrent"]" />
                         <div class="form-text">@Localizer["LeaveEmptyToKeepCurrent"]</div>
                         <span asp-validation-for="Password" class="text-danger"></span>
+                    </div>
+                    <div id="imapOAuth2Panel" class="alert alert-info" style="display: none;">
+                        @if (Model.Provider == ProviderType.IMAP && Model.ImapAuthMode == M365AuthenticationMode.OAuth2 && Model.IsM365OAuthConnected)
+                        {
+                            <p class="mb-2">@Localizer["M365OAuth2ConnectedOn", Model.OAuthConnectedAtUtc!.Value.ToLocalTime().ToString(System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.ShortDatePattern + " " + System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.ShortTimePattern)]</p>
+                        }
+                        else
+                        {
+                            <p class="mb-2">@Localizer["M365OAuth2NotConnected"]</p>
+                        }
+                        <div class="d-flex gap-2 flex-wrap">
+                            <a asp-action="ConnectM365OAuth2" asp-route-id="@Model.Id" class="btn btn-primary btn-sm">
+                                @((Model.Provider == ProviderType.IMAP && Model.ImapAuthMode == M365AuthenticationMode.OAuth2 && Model.IsM365OAuthConnected) ? Localizer["M365OAuth2Reconnect"] : Localizer["M365OAuth2Connect"])
+                            </a>
+                            @if (Model.Provider == ProviderType.IMAP && Model.ImapAuthMode == M365AuthenticationMode.OAuth2 && Model.IsM365OAuthConnected)
+                            {
+                                <button type="submit" form="disconnectM365OAuth2Form" class="btn btn-outline-danger btn-sm">@Localizer["M365OAuth2Disconnect"]</button>
+                            }
+                        </div>
                     </div>
                     <div class="mb-3 form-check">
                         <input asp-for="UseSSL" class="form-check-input" />
@@ -65,39 +92,70 @@
                 
                 <div id="microsoft365Settings" style="display: none;">
                     <h4 class="mt-4">@Localizer["Microsoft365Settings"]</h4>
-                    
-                    <div id="bulkUpdateSuggestion" class="m365-suggestion-box m365-warning" style="display: none;">
-                        <h6 class="alert-heading"><i class="bi bi-exclamation-triangle"></i> @Localizer["CredentialChangeDetected"]</h6>
-                        <p>@Localizer["ApplyToAllDomainAccountsPrompt"]</p>
-                        <div id="affectedAccountsList" class="mb-2">
-                            <small>@Localizer["AffectedAccounts"]:</small>
-                            <ul id="affectedAccountsUl" class="mb-0"></ul>
+
+                    <div class="mb-3">
+                        <label asp-for="M365AuthMode" class="form-label">@Localizer["M365AuthMode"]</label>
+                        <select asp-for="M365AuthMode" class="form-select" id="M365AuthMode">
+                            <option value="@M365AuthenticationMode.AppCredentials">@Localizer["M365AuthModeAppCredentials"]</option>
+                            <option value="@M365AuthenticationMode.OAuth2">@Localizer["M365AuthModeOAuth2"]</option>
+                        </select>
+                        <span asp-validation-for="M365AuthMode" class="text-danger"></span>
+                    </div>
+
+                    <div id="m365AppCredentialsSection">
+                        <div id="bulkUpdateSuggestion" class="m365-suggestion-box m365-warning" style="display: none;">
+                            <h6 class="alert-heading"><i class="bi bi-exclamation-triangle"></i> @Localizer["CredentialChangeDetected"]</h6>
+                            <p>@Localizer["ApplyToAllDomainAccountsPrompt"]</p>
+                            <div id="affectedAccountsList" class="mb-2">
+                                <small>@Localizer["AffectedAccounts"]:</small>
+                                <ul id="affectedAccountsUl" class="mb-0"></ul>
+                            </div>
+                            <div class="form-check">
+                                <input type="checkbox" class="form-check-input" id="applyToAllDomainAccounts" name="ApplyToAllDomainAccounts" value="true">
+                                <label class="form-check-label" for="applyToAllDomainAccounts">
+                                    @Localizer["ApplyToAllAccounts"]
+                                </label>
+                            </div>
                         </div>
-                        <div class="form-check">
-                            <input type="checkbox" class="form-check-input" id="applyToAllDomainAccounts" name="ApplyToAllDomainAccounts" value="true">
-                            <label class="form-check-label" for="applyToAllDomainAccounts">
-                                @Localizer["ApplyToAllAccounts"]
-                            </label>
+                        
+                        <div class="mb-3">
+                            <label asp-for="ClientId" class="form-label">@Localizer["ClientId"]</label>
+                            <input asp-for="ClientId" class="form-control" id="ClientIdInput" />
+                            <span asp-validation-for="ClientId" class="text-danger"></span>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label asp-for="ClientSecret" class="form-label">@Localizer["ClientSecret"]</label>
+                            <input asp-for="ClientSecret" class="form-control" type="password" id="ClientSecretInput" placeholder="@Localizer["LeaveEmptyToKeepCurrent"]" />
+                            <div class="form-text">@Localizer["LeaveEmptyToKeepCurrent"]</div>
+                            <span asp-validation-for="ClientSecret" class="text-danger"></span>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label asp-for="TenantId" class="form-label">@Localizer["TenantId"]</label>
+                            <input asp-for="TenantId" class="form-control" id="TenantIdInput" />
+                            <span asp-validation-for="TenantId" class="text-danger"></span>
                         </div>
                     </div>
-                    
-                    <div class="mb-3">
-                        <label asp-for="ClientId" class="form-label">@Localizer["ClientId"]</label>
-                        <input asp-for="ClientId" class="form-control" id="ClientIdInput" />
-                        <span asp-validation-for="ClientId" class="text-danger"></span>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label asp-for="ClientSecret" class="form-label">@Localizer["ClientSecret"]</label>
-                        <input asp-for="ClientSecret" class="form-control" type="password" id="ClientSecretInput" placeholder="@Localizer["LeaveEmptyToKeepCurrent"]" />
-                        <div class="form-text">@Localizer["LeaveEmptyToKeepCurrent"]</div>
-                        <span asp-validation-for="ClientSecret" class="text-danger"></span>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label asp-for="TenantId" class="form-label">@Localizer["TenantId"]</label>
-                        <input asp-for="TenantId" class="form-control" id="TenantIdInput" />
-                        <span asp-validation-for="TenantId" class="text-danger"></span>
+
+                    <div id="m365OAuth2Panel" class="alert alert-info" style="display: none;">
+                        @if (Model.IsM365OAuthConnected)
+                        {
+                            <p class="mb-2">@Localizer["M365OAuth2ConnectedOn", Model.OAuthConnectedAtUtc!.Value.ToLocalTime().ToString(System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.ShortDatePattern + " " + System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.ShortTimePattern)]</p>
+                        }
+                        else
+                        {
+                            <p class="mb-2">@Localizer["M365OAuth2NotConnected"]</p>
+                        }
+                        <div class="d-flex gap-2 flex-wrap">
+                            <a asp-action="ConnectM365OAuth2" asp-route-id="@Model.Id" class="btn btn-primary btn-sm">
+                                @(Model.IsM365OAuthConnected ? Localizer["M365OAuth2Reconnect"] : Localizer["M365OAuth2Connect"])
+                            </a>
+                            @if (Model.IsM365OAuthConnected)
+                            {
+                                <button type="submit" form="disconnectM365OAuth2Form" class="btn btn-outline-danger btn-sm">@Localizer["M365OAuth2Disconnect"]</button>
+                            }
+                        </div>
                     </div>
                 </div>
                 
@@ -172,6 +230,12 @@
         </div>
     </div>
 </div>
+@if (Model.IsM365OAuthConnected && (Model.Provider == ProviderType.M365 || Model.Provider == ProviderType.IMAP))
+{
+    <form id="disconnectM365OAuth2Form" asp-action="DisconnectM365OAuth2" asp-route-id="@Model.Id" method="post">
+        @Html.AntiForgeryToken()
+    </form>
+}
 @section Scripts {
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -184,9 +248,15 @@
             const foldersContent = document.getElementById('foldersContent');
             const foldersLoading = document.getElementById('foldersLoading');
             const foldersError = document.getElementById('foldersError');
+            const imapAuthModeSelect = document.getElementById('ImapAuthMode');
+            const imapPasswordFields = document.getElementById('imapPasswordFields');
+            const imapOAuth2Panel = document.getElementById('imapOAuth2Panel');
             const clientIdInput = document.getElementById('ClientIdInput');
             const clientSecretInput = document.getElementById('ClientSecretInput');
             const tenantIdInput = document.getElementById('TenantIdInput');
+            const m365AuthModeSelect = document.getElementById('M365AuthMode');
+            const m365AppCredentialsSection = document.getElementById('m365AppCredentialsSection');
+            const m365OAuth2Panel = document.getElementById('m365OAuth2Panel');
             const bulkUpdateSuggestion = document.getElementById('bulkUpdateSuggestion');
             const affectedAccountsUl = document.getElementById('affectedAccountsUl');
             const applyToAllCheckbox = document.getElementById('applyToAllDomainAccounts');
@@ -199,6 +269,51 @@
             let originalTenantId = '@Model.TenantId';
             let affectedAccounts = [];
             let bulkUpdateRequested = false;
+
+            function isM365AppCredentialsMode() {
+                return providerSelect.value === '@ProviderType.M365' &&
+                    m365AuthModeSelect.value === '@M365AuthenticationMode.AppCredentials';
+            }
+
+            function isImapAppCredentialsMode() {
+                return providerSelect.value === '@ProviderType.IMAP' &&
+                    imapAuthModeSelect.value === '@M365AuthenticationMode.AppCredentials';
+            }
+
+            function toggleImapAuthModeSections() {
+                if (providerSelect.value !== '@ProviderType.IMAP') {
+                    imapPasswordFields.style.display = 'none';
+                    imapOAuth2Panel.style.display = 'none';
+                    return;
+                }
+
+                const appCredentialsMode = isImapAppCredentialsMode();
+                imapPasswordFields.style.display = appCredentialsMode ? 'block' : 'none';
+                imapOAuth2Panel.style.display = appCredentialsMode ? 'none' : 'block';
+            }
+
+            function toggleM365AuthModeSections() {
+                if (providerSelect.value !== '@ProviderType.M365') {
+                    m365AppCredentialsSection.style.display = 'none';
+                    m365OAuth2Panel.style.display = 'none';
+                    bulkUpdateSuggestion.style.display = 'none';
+                    if (applyToAllCheckbox) {
+                        applyToAllCheckbox.checked = false;
+                    }
+                    return;
+                }
+
+                const appCredentialsMode = isM365AppCredentialsMode();
+                m365AppCredentialsSection.style.display = appCredentialsMode ? 'block' : 'none';
+                m365OAuth2Panel.style.display = appCredentialsMode ? 'none' : 'block';
+
+                if (!appCredentialsMode) {
+                    bulkUpdateSuggestion.style.display = 'none';
+                    if (applyToAllCheckbox) {
+                        applyToAllCheckbox.checked = false;
+                    }
+                }
+            }
             
             function toggleSettings() {
                 const providerValue = providerSelect.value;
@@ -206,20 +321,24 @@
                     imapSettings.style.display = 'none';
                     microsoft365Settings.style.display = 'none';
                     emailDeletionSettings.style.display = 'none';
+                    toggleImapAuthModeSections();
                 } else if (providerValue === '@ProviderType.M365') {
                     imapSettings.style.display = 'none';
                     microsoft365Settings.style.display = 'block';
                     emailDeletionSettings.style.display = 'block';
+                    toggleM365AuthModeSections();
+                    toggleImapAuthModeSections();
                 } else {
                     imapSettings.style.display = 'block';
                     microsoft365Settings.style.display = 'none';
                     emailDeletionSettings.style.display = 'block';
+                    toggleM365AuthModeSections();
+                    toggleImapAuthModeSections();
                 }
             }
             
             function checkCredentialChanges() {
-                const providerValue = providerSelect.value;
-                if (providerValue !== '@ProviderType.M365') {
+                if (!isM365AppCredentialsMode()) {
                     bulkUpdateSuggestion.style.display = 'none';
                     return;
                 }
@@ -323,6 +442,14 @@
             
             // Add event listeners
             providerSelect.addEventListener('change', toggleSettings);
+
+            imapAuthModeSelect.addEventListener('change', function() {
+                toggleImapAuthModeSections();
+            });
+
+            m365AuthModeSelect.addEventListener('change', function() {
+                toggleM365AuthModeSections();
+            });
             
             // Monitor credential changes
             if (clientIdInput) {
@@ -347,7 +474,7 @@
                     console.log('Affected accounts:', affectedAccounts);
                     
                     // Check if bulk update is requested
-                    if (providerValue === '@ProviderType.M365' && applyToAllCheckbox && applyToAllCheckbox.checked && affectedAccounts.length > 0) {
+                    if (isM365AppCredentialsMode() && applyToAllCheckbox && applyToAllCheckbox.checked && affectedAccounts.length > 0) {
                         console.log('Bulk update condition MET! Intercepting form submission...');
                         e.preventDefault();
                         e.stopPropagation();

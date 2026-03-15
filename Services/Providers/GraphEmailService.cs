@@ -14,6 +14,7 @@ using Microsoft.Kiota.Abstractions.Authentication;
 using Microsoft.Kiota.Http.HttpClientLibrary;
 using Microsoft.Kiota.Abstractions;
 using Azure.Identity;
+using MailArchiver.Services;
 
 
 namespace MailArchiver.Services.Providers
@@ -30,6 +31,9 @@ namespace MailArchiver.Services.Providers
         private readonly MailSyncOptions _mailSyncOptions;
         private readonly DateTimeHelper _dateTimeHelper;
         private readonly MailArchiver.Services.Core.EmailCoreService _coreService;
+        private readonly M365OAuthTokenService _m365OAuthTokenService;
+        private static readonly TimeSpan OAuthExpiryBuffer = TimeSpan.FromMinutes(5);
+        private static readonly string[] GraphOAuthScopes = new[] { "offline_access", "Mail.Read", "Mail.ReadWrite" };
 
         public GraphEmailService(
             MailArchiverDbContext context,
@@ -38,7 +42,8 @@ namespace MailArchiver.Services.Providers
             IOptions<BatchOperationOptions> batchOptions,
             IOptions<MailSyncOptions> mailSyncOptions,
             DateTimeHelper dateTimeHelper,
-            MailArchiver.Services.Core.EmailCoreService coreService)
+            MailArchiver.Services.Core.EmailCoreService coreService,
+            M365OAuthTokenService m365OAuthTokenService)
         {
             _context = context;
             _logger = logger;
@@ -47,36 +52,130 @@ namespace MailArchiver.Services.Providers
             _mailSyncOptions = mailSyncOptions.Value;
             _dateTimeHelper = dateTimeHelper;
             _coreService = coreService;
+            _m365OAuthTokenService = m365OAuthTokenService;
         }
 
-/// <summary>
-/// Creates a GraphServiceClient for the specified M365 account using client credentials flow
-/// with automatic token refresh via Azure.Identity.
-/// </summary>
-///         /// <param name="account">The M365 mail account</param>
-/// <returns>Configured GraphServiceClient</returns>
-private async Task<GraphServiceClient> CreateGraphClientAsync(MailAccount account)
-{
-    if (string.IsNullOrEmpty(account.ClientId) || string.IsNullOrEmpty(account.ClientSecret))
-    {
-         throw new InvalidOperationException($"M365 account '{account.Name}' requires ClientId and ClientSecret for OAuth authentication");
-    }
+        /// <summary>
+        /// Creates a GraphServiceClient for the specified M365 account based on configured auth mode.
+        /// </summary>
+        /// <param name="account">The M365 mail account</param>
+        /// <returns>Configured GraphServiceClient</returns>
+        private Task<GraphServiceClient> CreateGraphClientAsync(MailAccount account)
+        {
+            if (account.M365AuthMode == M365AuthenticationMode.OAuth2)
+            {
+                var accessTokenProvider = new DelegateAccessTokenProvider(async (_, cancellationToken) =>
+                {
+                    return await GetValidOAuthAccessTokenAsync(account, cancellationToken);
+                });
+                var authProvider = new BaseBearerTokenAuthenticationProvider(accessTokenProvider);
+                var requestAdapter = new HttpClientRequestAdapter(authProvider);
+                return Task.FromResult(new GraphServiceClient(requestAdapter));
+            }
 
-    var tenantId = !string.IsNullOrEmpty(account.TenantId) ? account.TenantId : "common";
+            if (string.IsNullOrWhiteSpace(account.ClientId) || string.IsNullOrWhiteSpace(account.ClientSecret))
+            {
+                throw new InvalidOperationException(
+                    $"M365 account '{account.Name}' requires ClientId and ClientSecret for app credential authentication.");
+            }
 
-    // Azure.Identity handles token acquisition + refresh automatically
-    var credential = new ClientSecretCredential(
-        tenantId: tenantId,
-        clientId: account.ClientId,
-        clientSecret: account.ClientSecret);
+            var tenantId = !string.IsNullOrWhiteSpace(account.TenantId) ? account.TenantId : "common";
+            var credential = new ClientSecretCredential(
+                tenantId: tenantId,
+                clientId: account.ClientId,
+                clientSecret: account.ClientSecret);
 
-    // Use .default for app permissions
-    var graphServiceClient = new GraphServiceClient(
-        credential,
-        new[] { "https://graph.microsoft.com/.default" });
+            return Task.FromResult(new GraphServiceClient(
+                credential,
+                new[] { "https://graph.microsoft.com/.default" }));
+        }
 
-    return graphServiceClient;
-}
+        private async Task<string> GetValidOAuthAccessTokenAsync(
+            MailAccount account,
+            CancellationToken cancellationToken = default)
+        {
+            var now = DateTime.UtcNow;
+            if (!string.IsNullOrWhiteSpace(account.OAuthAccessToken) &&
+                account.OAuthAccessTokenExpiresAtUtc.HasValue &&
+                account.OAuthAccessTokenExpiresAtUtc.Value > now.Add(OAuthExpiryBuffer))
+            {
+                return account.OAuthAccessToken;
+            }
+
+            if (string.IsNullOrWhiteSpace(account.OAuthRefreshToken))
+            {
+                throw new InvalidOperationException(
+                    $"OAuth refresh token is missing for M365 account '{account.Name}' (ID: {account.Id}). Reconnect the account.");
+            }
+
+            M365TokenResponse? refreshed;
+            try
+            {
+                refreshed = await _m365OAuthTokenService.RefreshAccessTokenAsync(account.OAuthRefreshToken, GraphOAuthScopes, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"OAuth token refresh failed for M365 account '{account.Name}' (ID: {account.Id}).",
+                    ex);
+            }
+
+            if (refreshed == null || string.IsNullOrWhiteSpace(refreshed.AccessToken))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to refresh OAuth access token for M365 account '{account.Name}' (ID: {account.Id}).");
+            }
+
+            var expiresAtUtc = DateTime.UtcNow.AddSeconds(refreshed.ExpiresIn > 0 ? refreshed.ExpiresIn : 3600);
+            var refreshToken = string.IsNullOrWhiteSpace(refreshed.RefreshToken)
+                ? account.OAuthRefreshToken
+                : refreshed.RefreshToken;
+
+            var updatedRows = await _context.MailAccounts
+                .Where(a => a.Id == account.Id)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(a => a.OAuthAccessToken, refreshed.AccessToken)
+                    .SetProperty(a => a.OAuthAccessTokenExpiresAtUtc, expiresAtUtc)
+                    .SetProperty(a => a.OAuthRefreshToken, refreshToken)
+                    .SetProperty(a => a.OAuthTokenScope, refreshed.Scope)
+                    .SetProperty(a => a.OAuthTokenType, refreshed.TokenType),
+                    cancellationToken);
+
+            if (updatedRows == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to persist refreshed OAuth token because account '{account.Name}' (ID: {account.Id}) no longer exists.");
+            }
+
+            account.OAuthAccessToken = refreshed.AccessToken;
+            account.OAuthAccessTokenExpiresAtUtc = expiresAtUtc;
+            account.OAuthRefreshToken = refreshToken;
+            account.OAuthTokenScope = refreshed.Scope;
+            account.OAuthTokenType = refreshed.TokenType;
+
+            return refreshed.AccessToken;
+        }
+
+        private sealed class DelegateAccessTokenProvider : IAccessTokenProvider
+        {
+            private readonly Func<Uri, CancellationToken, Task<string>> _tokenFactory;
+
+            public DelegateAccessTokenProvider(Func<Uri, CancellationToken, Task<string>> tokenFactory)
+            {
+                _tokenFactory = tokenFactory;
+            }
+
+            public AllowedHostsValidator AllowedHostsValidator { get; } =
+                new(new[] { "graph.microsoft.com" });
+
+            public Task<string> GetAuthorizationTokenAsync(
+                Uri uri,
+                Dictionary<string, object>? additionalAuthenticationContext = null,
+                CancellationToken cancellationToken = default)
+            {
+                return _tokenFactory(uri, cancellationToken);
+            }
+        }
 
 
        

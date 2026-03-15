@@ -96,6 +96,15 @@ services:
       - OAuth__AutoRedirect=false
       - OAuth__AutoApproveUsers=false
       - OAuth__AdminEmails__0=admin@example.com
+
+      # M365 OAuth2 Connect Settings (optional, used by IMAP OAuth2 mode for M365 accounts)
+      - M365OAuth__Authority=https://login.live.com
+      - M365OAuth__AuthorizationEndpoint=https://login.live.com/oauth20_authorize.srf
+      - M365OAuth__TokenEndpoint=https://login.live.com/oauth20_token.srf
+      - M365OAuth__ClientId=YOUR-M365-CLIENT-ID
+      - M365OAuth__ClientSecret=YOUR-M365-CLIENT-SECRET
+      - M365OAuth__Scopes__0=offline_access
+      - M365OAuth__Scopes__1=https://outlook.office.com/IMAP.AccessAsUser.All
     ports:
       - "5000:5000"
     networks:
@@ -156,6 +165,9 @@ docker compose restart
    - Navigate to "Email Accounts" section
    - Click "New Account"
    - Enter your server details and credentials
+   - For M365 accounts, select the authentication mode:
+     - **App Credentials**: provide `ClientId`, `ClientSecret`, and `TenantId`
+     - **OAuth2 Connect**: create/save the account first, then open **Edit** -> **Connect** to authorize and store refresh token
    - Save and start archiving!
    - If you want, create other users and assign accounts.
 
@@ -264,6 +276,15 @@ For detailed setup instructions for OpenID Connect authentication, see [OIDC Imp
 #### Passwordless Login Settings
 - `OAuth__DisablePasswordLogin`: Hide username/password fields on login page (true/false). Default is `false`. When enabled, only the OAuth login button is displayed.
 - `OAuth__AutoRedirect`: Automatically redirect users to OAuth provider (true/false). Default is `false`. Requires `OAuth__DisablePasswordLogin` to be `true`. Users will see a brief loading screen before being redirected.
+
+### 📧 M365 OAuth2 Connect Configuration
+- `M365OAuth__Authority`: OAuth authority used by IMAP OAuth2 mode for M365 accounts. Default: `https://login.live.com`
+- `M365OAuth__AuthorizationEndpoint`: Authorization endpoint override. Default: `https://login.live.com/oauth20_authorize.srf`
+- `M365OAuth__TokenEndpoint`: Token endpoint override. Default: `https://login.live.com/oauth20_token.srf`
+- `M365OAuth__ClientId`: Client ID of the Azure App Registration used for delegated M365 login
+- `M365OAuth__ClientSecret`: Client secret of the Azure App Registration
+- `M365OAuth__Scopes__0`: First delegated scope (default `offline_access`)
+- `M365OAuth__Scopes__1`: Second delegated scope (default `https://outlook.office.com/IMAP.AccessAsUser.All`)
 
 #### Example: Full OIDC-First Configuration
 ```yaml

@@ -40,6 +40,12 @@ namespace MailArchiver.Models.ViewModels
         
         [Display(Name = "Provider")]
         public ProviderType Provider { get; set; } = ProviderType.IMAP;
+
+        [Display(Name = "IMAP Authentication Mode")]
+        public M365AuthenticationMode ImapAuthMode { get; set; } = M365AuthenticationMode.AppCredentials;
+
+        [Display(Name = "M365 Authentication Mode")]
+        public M365AuthenticationMode M365AuthMode { get; set; } = M365AuthenticationMode.AppCredentials;
         
         [Display(Name = "Client ID")]
         [ConditionalRequired(nameof(Provider), ProviderType.M365, ErrorMessage = "Client ID is required for M365 accounts")]
